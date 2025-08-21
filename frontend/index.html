@@ -1,0 +1,228 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Insyd Notifications POC</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+      body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
+      .wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; }
+      h2 { margin-top: 0; }
+      input, textarea, select, button {
+        padding: 8px; margin: 4px 0; width: 100%; box-sizing: border-box;
+      }
+      ul { padding-left: 20px; }
+      .notif { border-bottom: 1px dashed #ddd; padding: 6px 0; }
+      .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #888; margin-left: 8px; font-size: 12px;}
+    </style>
+  </head>
+  <body>
+    <h1>Insyd Notifications POC</h1>
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const API_BASE = localStorage.getItem('apiBase') || 'http://localhost:4000';
+
+      function useApiBase() {
+        const [api, setApi] = React.useState(API_BASE);
+        React.useEffect(() => {
+          localStorage.setItem('apiBase', api);
+        }, [api]);
+        return [api, setApi];
+      }
+
+      async function api(path, opts={}) {
+        const res = await fetch(`${API_BASE}${path}`, {
+          headers: { 'Content-Type': 'application/json' },
+          ...opts,
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const ct = res.headers.get('content-type') || '';
+        return ct.includes('application/json') ? res.json() : res.text();
+      }
+
+      function App() {
+        const [apiBase, setApiBase] = useApiBase();
+        const [users, setUsers] = React.useState([]);
+        const [currentUserId, setCurrentUserId] = React.useState('');
+        const [notifs, setNotifs] = React.useState([]);
+        const [streamStatus, setStreamStatus] = React.useState('disconnected');
+
+        const loadUsers = async () => {
+          const u = await api('/users', { method: 'GET' });
+          setUsers(u);
+        };
+
+        const loadNotifs = async (uid) => {
+          if (!uid) return;
+          const data = await api(`/notifications?userId=${uid}`);
+          setNotifs(data);
+        };
+
+        React.useEffect(() => { loadUsers(); }, []);
+        React.useEffect(() => { if (currentUserId) loadNotifs(currentUserId) }, [currentUserId]);
+
+        const connectSSE = () => {
+          if (!currentUserId) return;
+          const es = new EventSource(`${API_BASE}/stream/notifications?userId=${currentUserId}`);
+          setStreamStatus('connecting');
+          es.onopen = () => setStreamStatus('connected');
+          es.onerror = () => setStreamStatus('error');
+          es.onmessage = (evt) => {
+            try {
+              const msg = JSON.parse(evt.data);
+              if (msg.kind === 'notification') {
+                setNotifs(prev => [msg.data, ...prev]);
+              }
+            } catch (e) {}
+          };
+        };
+
+        return (
+          <div className="wrap">
+            <div className="card">
+              <h2>Config</h2>
+              <label>API Base</label>
+              <input value={apiBase} onChange={e => { setApiBase(e.target.value); }} />
+              <button onClick={() => window.location.reload()}>Reload</button>
+            </div>
+
+            <div className="card">
+              <h2>Users</h2>
+              <CreateUser onCreated={loadUsers} />
+              <button onClick={loadUsers}>Refresh</button>
+              <ul>
+                {users.map(u => (
+                  <li key={u.id}>
+                    {u.name} (id {u.id})
+                    <button onClick={() => setCurrentUserId(String(u.id))} style={{marginLeft: 8}}>Use as Me</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="card">
+              <h2>Social Actions</h2>
+              <Follow users={users} />
+              <CreatePost users={users} />
+              <ManualNotif users={users} />
+            </div>
+
+            <div className="card">
+              <h2>
+                Notifications {currentUserId ? <span className="badge">for user {currentUserId}</span> : null}
+                <button onClick={connectSSE} style={{marginLeft: 8}}>Connect Live (SSE)</button>
+                <span className="badge">{streamStatus}</span>
+              </h2>
+              <button onClick={() => loadNotifs(currentUserId)}>Refresh</button>
+              {!currentUserId && <p>Select a user via "Use as Me" to view notifications.</p>}
+              {currentUserId && (
+                <ul>
+                  {notifs.map(n => (
+                    <li key={n.id} className="notif">
+                      <div><b>{n.type}</b> — {n.content}</div>
+                      <div style={{fontSize: 12, opacity: 0.7}}>
+                        id {n.id} • {n.created_at} • {n.is_read ? 'read' : 'unread'}
+                        {!n.is_read && <button onClick={async () => {
+                          await api(`/notifications/${n.id}/read`, { method: 'POST' });
+                          setNotifs(prev => prev.map(p => p.id === n.id ? {...p, is_read: 1} : p));
+                        }} style={{marginLeft: 8}}>Mark read</button>}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      function CreateUser({ onCreated }) {
+        const [name, setName] = React.useState('');
+        const create = async () => {
+          if (!name.trim()) return;
+          await api('/users', { method: 'POST', body: JSON.stringify({ name }) });
+          setName('');
+          onCreated?.();
+        };
+        return (
+          <div>
+            <label>New User</label>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g., Asha" />
+            <button onClick={create}>Create</button>
+          </div>
+        );
+      }
+
+      function Follow({ users }) {
+        const [followerId, setFollowerId] = React.useState('');
+        const [followeeId, setFolloweeId] = React.useState('');
+        const submit = async () => {
+          await api('/follow', { method: 'POST', body: JSON.stringify({ followerId: Number(followerId), followeeId: Number(followeeId) }) });
+          alert('Followed! Notification sent to followee.');
+        };
+        return (
+          <div>
+            <h3>Follow</h3>
+            <select value={followerId} onChange={e => setFollowerId(e.target.value)}>
+              <option value="">Follower (who follows)</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.name} (id {u.id})</option>)}
+            </select>
+            <select value={followeeId} onChange={e => setFolloweeId(e.target.value)}>
+              <option value="">Followee (who is followed)</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.name} (id {u.id})</option>)}
+            </select>
+            <button onClick={submit}>Follow</button>
+          </div>
+        );
+      }
+
+      function CreatePost({ users }) {
+        const [userId, setUserId] = React.useState('');
+        const [content, setContent] = React.useState('');
+        const submit = async () => {
+          await api('/posts', { method: 'POST', body: JSON.stringify({ userId: Number(userId), content }) });
+          setContent('');
+          alert('Posted! Followers notified.');
+        };
+        return (
+          <div>
+            <h3>Create Post</h3>
+            <select value={userId} onChange={e => setUserId(e.target.value)}>
+              <option value="">Author</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.name} (id {u.id})</option>)}
+            </select>
+            <textarea value={content} onChange={e => setContent(e.target.value)} placeholder="Write something..." rows="3"></textarea>
+            <button onClick={submit}>Publish</button>
+          </div>
+        );
+      }
+
+      function ManualNotif({ users }) {
+        const [userId, setUserId] = React.useState('');
+        const [content, setContent] = React.useState('A test notification');
+        const submit = async () => {
+          await api('/notify/test', { method: 'POST', body: JSON.stringify({ userId: Number(userId), content }) });
+          alert('Sent!');
+        };
+        return (
+          <div>
+            <h3>Manual/Test Notification</h3>
+            <select value={userId} onChange={e => setUserId(e.target.value)}>
+              <option value="">Recipient</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.name} (id {u.id})</option>)}
+            </select>
+            <input value={content} onChange={e => setContent(e.target.value)} />
+            <button onClick={submit}>Send</button>
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+  </body>
+</html>
